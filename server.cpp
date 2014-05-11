@@ -13,7 +13,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <netinet/in.h>
-
+#include <errno.h>
 
 
 using namespace std;
@@ -34,7 +34,7 @@ public:
 	PthreadBase()
 		:tid(0) {
 		pthread_attr_init(&attr);
-		printf("start %s\n" , threadinfo);
+//		printf("start %s\n" , threadinfo);
 	}
 
 	~PthreadBase()
@@ -46,13 +46,15 @@ public:
 	virtual void* run(void* args) { return NULL; }
 
 	 
-	bool start(void* arg = NULL)
+	bool start(void* obj , void* arg = NULL)
 	{
-		struct args args;
+		struct args* args;
 		
-		args.obj = this;
-		args.arg = arg;
-		if(pthread_create(&tid , &attr , thread_fn , &args)){
+		args = (struct args*)malloc(sizeof(struct args));
+		args->obj = (PthreadBase*)obj;
+		args->arg = arg;
+
+		if(pthread_create(&tid , &attr , thread_fn , args)){
 			perror("pthread_create failed");
 			return false;
 		}
@@ -82,7 +84,12 @@ private:
 	{
 		struct args* val= (struct args*)_arg;
 		PthreadBase* obj = static_cast<PthreadBase*>(val->obj);
-		obj->run(val->arg);
+		void* arg = val->arg;
+		free(val);
+
+		obj->run(arg);
+//		PthreadBase* obj = val->obj;
+		//val->obj->run(val->arg);
 
 		return NULL;
 	}
@@ -128,8 +135,11 @@ public:
 					len = read(fd , buff , MAXLEN);
 					if(len < 0){
 						perror("Read failed");
-						epoll_ctl(epfd , EPOLL_CTL_DEL , fd , &ev);
-						close(fd);
+
+						if(errno != EAGAIN && errno != EINTR) {
+							epoll_ctl(epfd , EPOLL_CTL_DEL , fd , &ev);
+							close(fd);
+						}
 					} else {
 						buff[len] = '\0';
 //						len = write(fd, buff, strlen(buf));
@@ -212,7 +222,7 @@ public:
 			workers[i] = new Worker();
 			if(workers[i] != NULL)
 			{
-				workers[i]->start(&epfd);
+				workers[i]->start(workers[i] , &epfd);
 				printf("Start process %d\n" , i);
 			}
 		}
@@ -409,7 +419,7 @@ int main(int argc , char** argv)
 	}
 
 	running = true;
-	cm->start();
+	cm->start(cm);
 	create_workgroup();
 	
 	pause();
