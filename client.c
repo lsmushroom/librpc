@@ -7,6 +7,7 @@
 
 #include <strings.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <sys/epoll.h>
 #include <linux/tcp.h>
@@ -26,7 +27,7 @@ int main(int argc, char *argv[])
 	char sndbuf[] = "Test aaaaa\n";
 	char rcvbuf[100];
 	const int _maxSendSize = 4096;
-	int size = sizeof(_maxSendSize);
+	socklen_t size = sizeof(_maxSendSize);
 
 	memset(rcvbuf , 0 , 100);
 
@@ -108,7 +109,7 @@ int main(int argc, char *argv[])
         if(events.events & EPOLLOUT)
         {
             int val = 0;
-            int len = sizeof(int);
+            socklen_t len = sizeof(int);
             if( (ret = getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &val, &len)) < 0 )
             {
                 perror("getsockopt failed:");

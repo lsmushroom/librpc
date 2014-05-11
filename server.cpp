@@ -19,6 +19,7 @@
 using namespace std;
 
 #define MAXLEN 10
+#define WORKER_PER_GROUP 8
 
 int running = 0;
 int ncpus = 0;
@@ -33,6 +34,7 @@ public:
 	PthreadBase()
 		:tid(0) {
 		pthread_attr_init(&attr);
+		printf("start %s\n" , threadinfo);
 	}
 
 	~PthreadBase()
@@ -41,22 +43,21 @@ public:
 	}
 
 	//void *(*start_routine) (void *)
-	virtual void* run() { }
+	virtual void* run(void* args) { return NULL; }
 
-	struct args
-	{
-		PthreadBase* obj;
-		void* arg;
-	};
 	 
-	bool start(void* arg)
+	bool start(void* arg = NULL)
 	{
-		struct args.obj = this;
-		struct args.arg = arg;
+		struct args args;
+		
+		args.obj = this;
+		args.arg = arg;
 		if(pthread_create(&tid , &attr , thread_fn , &args)){
 			perror("pthread_create failed");
 			return false;
 		}
+
+		return true;
 	}
 
 	void join()
@@ -69,7 +70,14 @@ public:
 		return tid;
 	}
 	
+	char threadinfo[32];
 private:
+	struct args
+	{
+		PthreadBase* obj;
+		void* arg;
+	};
+
 	static void* thread_fn(void* _arg)
 	{
 		struct args* val= (struct args*)_arg;
@@ -86,9 +94,11 @@ private:
 class Worker:public PthreadBase
 {
 public:
-	Worker()
+	//Worker() //未初始化PthreadBase
+	Worker():PthreadBase()
 	{
 		memset(buff , 0 , sizeof(buff));
+		strncpy(threadinfo , "Worker" , sizeof("Worker"));
 	}
 
 	~Worker()
@@ -96,10 +106,13 @@ public:
 		printf("Desconstruct Worker\n");
 	}
 
-	void* run()
+	void* run(void* args)
 	{
 		int numfd = 0;
+		int epfd = *(int*)args;
 		struct epoll_event evt;
+		printf("start running [%lu] on epfd %d\n" , pthread_self() , epfd);
+
 		while(running)
 		{
 			numfd = epoll_wait(epfd , &evt , 1 , 1000);
@@ -127,7 +140,7 @@ public:
 							epoll_ctl(epfd , EPOLL_CTL_DEL , fd , &ev);
 							close(fd);
 						}else{
-							printf("%d::receive %s\n" , time(NULL), buff);
+							printf("%lu::receive %s\n" , time(NULL), buff);
 							memset(buff , 0 , sizeof(buff));
 						}
 					}
@@ -146,6 +159,7 @@ public:
 			}
 		}
 
+		printf("stop running and exit [%lu]\n" , pthread_self());
 		return NULL;
 	}
 
@@ -154,33 +168,95 @@ private:
 	char buff[MAXLEN];
 };
 
-class WorkSet
+class WorkGroup
 {
 public:
-	WorkSet(int _threadnum)
+	WorkGroup()
 	{
+		strncpy(threadinfo , "WorkGroup" , sizeof("Worker"));
 		epfd = epoll_create1(0);
-		if(epfd < 0)
-		{
+		if(epfd < 0) {
 			perror("epoll create failed");
 		}
+		create_pool();
 	}
 	
+	~WorkGroup()
+	{
+		close(epfd);
+		join();
+	}
+	
+	void create_pool()
+	{
+		int i;
+//		ncpus = sysconf(_SC_NPROCESSORS_CONF);
+
+		workers = (Worker**)malloc(sizeof(Worker*) * WORKER_PER_GROUP);
+		memset(workers , 0 , sizeof(Worker*) * WORKER_PER_GROUP);
+		//pthread_attr_t attr;
+		//cpu_set_t set;
+
+		for(i = 0; i < WORKER_PER_GROUP; i++)
+		{
+			//set pthread attribute
+			/*		CPU_ZERO(&set);
+					CPU_SET(i , &set);
+					pthread_attr_init(&attr);
+					pthread_attr_setaffinity_np(&attr , sizeof(set) , &set);
+
+					if(pthread_create(tids[i] , &attr , work_thread , NULL)){
+					perror("pthread_create failed");
+					i--;
+					}*/
+			workers[i] = new Worker();
+			if(workers[i] != NULL)
+			{
+				workers[i]->start(&epfd);
+				printf("Start process %d\n" , i);
+			}
+		}
+	}
+
 	operator int() const
 	{
 		return epfd;
 	}
 
+	void join()
+	{
+		int i;
+
+		if( workers ) {
+			for(i = 0; i < WORKER_PER_GROUP; i++)
+			{
+				if( workers[i] ) {
+					workers[i]->join();
+					printf("joined worker thread %lu\n" , workers[i]->get_tid() );
+					delete workers[i];
+					workers[i] = NULL;
+				}
+			}
+			free(workers);
+			workers = NULL;
+		}
+	}
+
 private:
 	int epfd;
-}
+	Worker** workers;
+	char threadinfo[32];
+};
 
-Worker** workers = NULL;
+WorkGroup** wgs = NULL;
 
 class ConnectionManager:public PthreadBase
 {
 public:
-	ConnectionManager(int _fd):fd(_fd){}
+	ConnectionManager(int _fd):PthreadBase() , fd(_fd)
+	{
+		strncpy(threadinfo , "ConnectionManager" , sizeof("ConnectionManager"));
+	}
 
 	~ConnectionManager()
 	{
@@ -274,7 +350,7 @@ failed:
 					/* register to worker-pool's epoll,
 					 *                  * not the listen epoll */
 //					g_conn_table[sock].index= rrIndex;
-					epoll_ctl(*workers[rrIndex], EPOLL_CTL_ADD, fd, &evt);
+					epoll_ctl(*wgs[rrIndex], EPOLL_CTL_ADD, fd, &evt);
 					rrIndex = (rrIndex + 1) % ncpus;
 				}
 			}
@@ -289,36 +365,6 @@ private:
 	int fd;
 };
 
-void create_pool()
-{
-	int i;
-	ncpus = sysconf(_SC_NPROCESSORS_CONF);
-
-	workers = (Worker**)malloc(sizeof(Worker*) * ncpus);
-	memset(workers , 0 , sizeof(Worker*) * ncpus);
-	pthread_attr_t attr;
-	cpu_set_t set;
-	
-	for(i = 0; i < ncpus; i++)
-	{
-		//set pthread attribute
-/*		CPU_ZERO(&set);
-		CPU_SET(i , &set);
-		pthread_attr_init(&attr);
-		pthread_attr_setaffinity_np(&attr , sizeof(set) , &set);
-
-		if(pthread_create(tids[i] , &attr , work_thread , NULL)){
-			perror("pthread_create failed");
-			i--;
-		}*/
-		workers[i] = new Worker();
-		if(workers[i] != NULL)
-		{
-			workers[i]->start();
-			printf("Start process %d\n" , i);
-		}
-	}
-}
 
 typedef void (*sighandler_t)(int);
 
@@ -326,6 +372,21 @@ void sighandler(int sig)
 {
 	printf("stop the threads\n");
 	running = false;
+}
+
+void create_workgroup()
+{
+	int i;
+	ncpus = sysconf(_SC_NPROCESSORS_CONF);
+
+	wgs = (WorkGroup**)malloc(sizeof(WorkGroup*) * ncpus);
+	memset(wgs , 0 , sizeof(WorkGroup*) * ncpus);
+
+	for(i = 0; i < ncpus; i++)
+	{
+		printf("Start WorkGroup %d:\n" , i);
+		wgs[i] = new WorkGroup();
+	}
 }
 
 int main(int argc , char** argv)
@@ -349,17 +410,21 @@ int main(int argc , char** argv)
 
 	running = true;
 	cm->start();
-	create_pool();
+	create_workgroup();
 	
 	pause();
+	
 	for(i = 0; i < ncpus; i++)
 	{
-		workers[i]->join();
-		printf("joined worker thread %d\n" , workers[i]->get_tid() );
-		delete workers[i];
+		printf("join work group %d:\n" , i);
+		wgs[i]->join();
+		delete wgs[i];
 	}
+	free(wgs);
+	wgs = NULL;
+
 	cm->join();
-	printf("joined listener thread %d\n" , cm->get_tid() );
+	printf("joined listener thread %lu\n" , cm->get_tid() );
 	delete cm;
 
 	return 0;
